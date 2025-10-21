@@ -258,6 +258,13 @@ manager = SequenceManager()
 MEASURES: List[Dict] = []
 LOAD_ERROR: Optional[str] = None
 
+# Empêche plusieurs initialisations concurrentes lorsque Flask importe
+# simplement le module (ex. "flask run").  Sans cela, le chargement de la
+# base et la détection de l'instrument ne sont jamais effectués, ce qui laisse
+# la liste des mesures vide et bloque le bouton "Start" côté UI.
+_BOOTSTRAP_LOCK = threading.Lock()
+_BOOTSTRAPPED = False
+
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="fr">
@@ -458,6 +465,16 @@ loadInfo();
 def index():
     return render_template_string(HTML_PAGE)
 
+
+# Flask 3.x a supprimé le hook before_first_request. Utilisons before_serving,
+# disponible également sur les versions 2.x, pour conserver une initialisation
+# unique avant le premier traitement de requête quel que soit le mode
+# d'exécution ("flask run" ou exécution directe du script).
+@app.before_serving
+def _ensure_bootstrap():
+    """Initialisation automatique lors du premier accès HTTP."""
+    bootstrap()
+
 @app.route("/db_info")
 def db_info():
     if LOAD_ERROR:
@@ -548,26 +565,34 @@ def logs_route():
 
 # ========= Bootstrap =========
 def bootstrap():
-    global instrument, MEASURES, LOAD_ERROR
-    try:
-        MEASURES = load_database(NPZ_PATH)
-    except Exception as e:
-        LOAD_ERROR = f"{type(e).__name__}: {e}"
-        MEASURES = []
-        logger.error(f"[DB] Erreur chargement: {LOAD_ERROR}")
+    """Charge la base et détecte l'instrument une seule fois."""
+    global instrument, MEASURES, LOAD_ERROR, _BOOTSTRAPPED
 
-    try:
-        if not DRY_RUN:
-            instrument = find_instrument()
-            if instrument:
-                manager.set_instrument(instrument)
-                logger.info(f"[BOOT] Instrument prêt sur {instrument.serial.port}")
+    with _BOOTSTRAP_LOCK:
+        if _BOOTSTRAPPED:
+            return
+
+        try:
+            MEASURES = load_database(NPZ_PATH)
+        except Exception as e:
+            LOAD_ERROR = f"{type(e).__name__}: {e}"
+            MEASURES = []
+            logger.error(f"[DB] Erreur chargement: {LOAD_ERROR}")
+
+        try:
+            if not DRY_RUN:
+                instrument = find_instrument()
+                if instrument:
+                    manager.set_instrument(instrument)
+                    logger.info(f"[BOOT] Instrument prêt sur {instrument.serial.port}")
+                else:
+                    logger.warning("[BOOT] Instrument non détecté (Start échouera).")
             else:
-                logger.warning("[BOOT] Instrument non détecté (Start échouera).")
-        else:
-            logger.warning("[BOOT] DRY_RUN=1 : aucune écriture Modbus, logs uniquement.")
-    except Exception as e:
-        logger.error(f"[BOOT] Erreur instrument: {e}")
+                logger.warning("[BOOT] DRY_RUN=1 : aucune écriture Modbus, logs uniquement.")
+        except Exception as e:
+            logger.error(f"[BOOT] Erreur instrument: {e}")
+
+        _BOOTSTRAPPED = True
 
 if __name__ == "__main__":
     bootstrap()
