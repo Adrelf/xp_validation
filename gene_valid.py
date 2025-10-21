@@ -466,7 +466,11 @@ def index():
     return render_template_string(HTML_PAGE)
 
 
-@app.before_first_request
+# Flask 3.x a supprimé le hook before_first_request. Utilisons before_serving,
+# disponible également sur les versions 2.x, pour conserver une initialisation
+# unique avant le premier traitement de requête quel que soit le mode
+# d'exécution ("flask run" ou exécution directe du script).
+@app.before_serving
 def _ensure_bootstrap():
     """Initialisation automatique lors du premier accès HTTP."""
     bootstrap()
